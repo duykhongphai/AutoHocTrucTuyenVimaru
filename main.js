@@ -11,7 +11,7 @@
 
 (async () => {
   const API_KEY = "4c9fe6685c1f4a49a15c6490664b0ce5.JdGHwHx4qr_fMz1TKkKsZMYy";
-  const MODEL = "qwen3-coder:480b-cloud";
+  const MODEL = "qwen3-coder:480b-cloud"; // gpt-oss:120b-cloud
   const SCAN_INTERVAL = 500;
 
   const log = (msg) => console.log(`[AutoQuiz] ${msg}`);
