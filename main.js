@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoQuiz Vimaru
 // @namespace    http://tampermonkey.net/
-// @version      4.0
+// @version      5.0
 // @description  Tự động trả lời trắc nghiệm Vimaru
 // @author       You
 // @match        https://hoctructuyen.vimaru.edu.vn/*
@@ -16,6 +16,7 @@
 
   const log = (msg) => console.log(`[AutoQuiz] ${msg}`);
 
+  // ===== CHỜ ELEMENT =====
   function waitForElement(selector, timeout = 120000) {
     return new Promise((resolve, reject) => {
       const start = Date.now();
@@ -31,6 +32,7 @@
     });
   }
 
+  // ===== THÊM DẤU CHẤM =====
   function addDot(labelEl) {
     if (!labelEl || labelEl.innerText.trim().endsWith(".")) return;
     const textNodes = [...labelEl.childNodes].filter(n => n.nodeType === Node.TEXT_NODE);
@@ -42,8 +44,54 @@
     }
   }
 
-  function callOllama(prompt) {
+  // ===== GỌI OLLAMA: câu có choices → trả về index (0-based) =====
+  function callOllamaChoices(question, choices) {
     return new Promise((resolve, reject) => {
+      const choiceText = choices.map((c, i) => `${i + 1}. ${c.text}`).join("\n");
+      const prompt =
+        `Bạn là hệ thống trả lời trắc nghiệm.\n` +
+        `- Chọn tất cả đáp án đúng\n` +
+        `- Trả lời CHỈ gồm các số thứ tự cách nhau bằng dấu phẩy (ví dụ: 1, 3). KHÔNG giải thích gì thêm.\n\n` +
+        `${question}\n\n${choiceText}`;
+
+      GM_xmlhttpRequest({
+        method: "POST",
+        url: "https://ollama.com/api/chat",
+        headers: {
+          "Authorization": `Bearer ${API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        data: JSON.stringify({
+          model: MODEL,
+          messages: [{ role: "user", content: prompt }],
+          stream: false
+        }),
+        timeout: 30000,
+        onload: (res) => {
+          try {
+            const data = JSON.parse(res.responseText);
+            const raw = data?.message?.content || "";
+            log(`AI: ${raw}`);
+            const matched = raw.match(/\d+/g);
+            const indices = matched
+              ? [...new Set(matched.map(n => parseInt(n) - 1).filter(n => n >= 0 && n < choices.length))]
+              : [];
+            resolve(indices);
+          } catch (e) { reject(new Error("Lỗi parse JSON")); }
+        },
+        onerror: () => reject(new Error("Request thất bại")),
+        ontimeout: () => reject(new Error("Timeout"))
+      });
+    });
+  }
+
+  // ===== GỌI OLLAMA: câu không có choices → trả về text =====
+  function callOllamaFree(question) {
+    return new Promise((resolve, reject) => {
+      const prompt =
+        `Bạn là trợ lý học tập. Trả lời ngắn gọn, súc tích bằng tiếng Việt.\n\n` +
+        `Câu hỏi: ${question}`;
+
       GM_xmlhttpRequest({
         method: "POST",
         url: "https://ollama.com/api/chat",
@@ -61,9 +109,7 @@
           try {
             const data = JSON.parse(res.responseText);
             resolve(data?.message?.content || "");
-          } catch (e) {
-            reject(new Error("Lỗi parse JSON"));
-          }
+          } catch (e) { reject(new Error("Lỗi parse JSON")); }
         },
         onerror: () => reject(new Error("Request thất bại")),
         ontimeout: () => reject(new Error("Timeout"))
@@ -71,7 +117,7 @@
     });
   }
 
-  // ===== REVIEW: đọc class correct =====
+  // ===== REVIEW MODE: đọc class correct từ DOM =====
   function processReview() {
     log("REVIEW mode...");
     document.querySelectorAll(".que.multichoice").forEach((queEl, idx) => {
@@ -83,7 +129,7 @@
     log("Xong!");
   }
 
-  // ===== ATTEMPT: có choices → gọi AI chọn đáp án =====
+  // ===== ATTEMPT MODE: gọi AI =====
   async function processAttempt() {
     log("ATTEMPT mode - gọi AI...");
     const questions = document.querySelectorAll(".que.multichoice");
@@ -96,43 +142,31 @@
 
       const labelEls = queEl.querySelectorAll(".answer [for]");
 
-      // ── Có đáp án → chọn đúng rồi thêm dấu chấm ──
+      // ── Có choices ──
       if (labelEls.length > 0) {
         const choices = [];
-        labelEls.forEach((labelEl, j) => {
-          choices.push({ label: String.fromCharCode(97 + j), text: labelEl.innerText.trim(), el: labelEl });
+        labelEls.forEach(labelEl => {
+          choices.push({ text: labelEl.innerText.trim(), el: labelEl });
         });
 
-        const choiceText = choices.map(c => `${c.label}. ${c.text}`).join("\n");
-        const prompt =
-          `Bạn là hệ thống trả lời trắc nghiệm.\n` +
-          `- Nếu câu hỏi cho phép nhiều đáp án → chọn tất cả đáp án đúng\n` +
-          `- Trả lời CHỈ gồm các chữ cái cách nhau bằng dấu phẩy (ví dụ: a, d). KHÔNG giải thích.\n\n` +
-          `${question}\n\nSelect one or more:\n${choiceText}`;
-
-        log(`Câu ${i + 1} [có đáp án]: ${question.substring(0, 50)}`);
+        log(`Câu ${i + 1} [${choices.length} lựa chọn]: ${question.substring(0, 50)}`);
         try {
-          const raw = await callOllama(prompt);
-          log(`AI: ${raw}`);
-          const correct = [...new Set((raw.toLowerCase().match(/\b[a-z]\b/g) || []))];
-          log(`→ [${correct.join(", ")}]`);
-          choices.forEach(c => { if (correct.includes(c.label)) addDot(c.el); });
+          const indices = await callOllamaChoices(question, choices);
+          log(`→ index: [${indices.join(", ")}]`);
+          choices.forEach((c, idx) => {
+            if (indices.includes(idx)) addDot(c.el);
+          });
         } catch (e) {
           log(`Lỗi câu ${i + 1}: ${e.message}`);
         }
 
-      // ── Không có đáp án → hỏi AI rồi chèn câu trả lời vào trang ──
+      // ── Không có choices ──
       } else {
-        const prompt =
-          `Bạn là trợ lý học tập. Trả lời ngắn gọn, súc tích bằng tiếng Việt.\n\n` +
-          `Câu hỏi: ${question}`;
-
-        log(`Câu ${i + 1} [không có đáp án]: ${question.substring(0, 50)}`);
+        log(`Câu ${i + 1} [tự luận]: ${question.substring(0, 50)}`);
         try {
-          const answer = await callOllama(prompt);
+          const answer = await callOllamaFree(question);
           log(`AI: ${answer}`);
 
-          // Chèn câu trả lời ngay sau .qtext
           const qTextEl = queEl.querySelector(".qtext");
           if (qTextEl && !queEl.querySelector(".autoquiz-answer")) {
             const div = document.createElement("div");
